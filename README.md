@@ -283,3 +283,230 @@ kubectl get pods -w
 # View logs
 kubectl logs -f [POD-NAME]
 ```
+
+
+
+
+
+____________________________________
+
+# HTTPS Setup Guide for React and FastAPI on GKE
+
+## Prerequisites
+- GKE cluster running
+- Docker images for frontend and backend
+- kubectl configured for your cluster
+
+## 1. Required Files Structure
+```
+project/
+├── k8s/
+│   ├── frontend-deployment.yaml
+│   ├── backend-deployment.yaml
+│   ├── ingress.yaml
+│   └── frontend-config.yaml
+├── frontend/
+│   ├── Dockerfile
+│   └── nginx.conf
+└── backend/
+    └── Dockerfile
+```
+
+## 2. Create SSL Certificate
+```bash
+# Generate self-signed certificate
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+-keyout tls.key -out tls.crt \
+-subj "/CN=frontend-service"
+
+# Create Kubernetes secret for SSL
+kubectl create secret tls frontend-tls \
+  --key tls.key \
+  --cert tls.crt
+```
+
+## 3. Create Static IP
+```bash
+# Reserve a static IP
+gcloud compute addresses create frontend-ip --global
+
+# Get the IP address
+gcloud compute addresses describe frontend-ip --global
+```
+
+## 4. Configuration Files
+
+### frontend-config.yaml
+```yaml
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: frontend-ingress-config
+spec:
+  redirectToHttps:
+    enabled: false
+```
+
+### ingress.yaml
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend-ingress
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "frontend-ip"
+    ingress.gcp.kubernetes.io/pre-shared-cert: "frontend-tls"
+    kubernetes.io/ingress.allow-http: "true"
+    networking.gke.io/v1beta1.FrontendConfig: "frontend-ingress-config"
+spec:
+  defaultBackend:
+    service:
+      name: frontend-service
+      port:
+        number: 80
+  rules:
+  - http:
+      paths:
+      - path: /api/*
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 8000
+      - path: /*
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 80
+```
+
+### Frontend Changes
+
+#### nginx.conf
+```nginx
+server {
+    listen 80;
+    server_name localhost;
+    
+    location / {
+        root /usr/share/nginx/html;
+        index index.html index.htm;
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://backend-service:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+#### React Frontend API Call
+```javascript
+const squareHandler = () => {
+    axios.post("/api/square", { number: numberInt }, {
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    })
+    .then((res) => {
+      sample(res.data);
+    })
+    .catch((error) => {
+      console.error("Error:", error);
+      sample("Error: " + error.message);
+    });
+};
+```
+
+### Backend Changes
+
+#### FastAPI Endpoint
+```python
+@app.post("/api/square")  # Note the /api prefix
+def square(data:My_Number_Class):
+    number = data.number
+    return str(number*number)
+```
+
+## 5. Deployment Steps
+
+1. Apply Frontend Configuration:
+```bash
+kubectl apply -f frontend-config.yaml
+```
+
+2. Apply Ingress:
+```bash
+kubectl apply -f ingress.yaml
+```
+
+3. Update Services:
+```bash
+kubectl patch service frontend-service -p '{"spec": {"type": "NodePort"}}'
+```
+
+4. Verify Setup:
+```bash
+# Check ingress status
+kubectl describe ingress frontend-ingress
+
+# Check frontend config
+kubectl get frontendconfig
+
+# Check SSL certificate
+kubectl get secrets frontend-tls
+```
+
+## 6. Monitoring and Troubleshooting
+
+Monitor Resources:
+```bash
+# Check ingress status
+kubectl get ingress frontend-ingress
+
+# Check services
+kubectl get services
+
+# Check pods
+kubectl get pods
+
+# View logs
+kubectl logs -l app=frontend
+kubectl logs -l app=backend
+```
+
+Common Issues and Solutions:
+1. 404 Errors:
+   - Verify API paths match between frontend and backend
+   - Check ingress path configurations
+
+2. SSL Certificate Issues:
+   - Verify certificate secret exists
+   - Check certificate referenced correctly in ingress
+
+3. Connection Issues:
+   - Verify services are running
+   - Check pod logs for errors
+   - Verify ingress configuration
+
+## 7. Security Considerations
+- The self-signed certificate will show security warnings in browsers
+- For production, use a valid SSL certificate
+- Consider enabling HTTPS redirect
+- Implement proper CORS policies
+- Regular certificate rotation
+
+## 8. Maintenance
+- Monitor certificate expiration
+- Keep track of IP address reservation
+- Regular security updates
+- Backup SSL certificates and configurations
